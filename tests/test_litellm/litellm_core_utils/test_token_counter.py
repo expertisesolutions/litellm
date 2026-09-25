@@ -6,6 +6,7 @@ import importlib
 import threading
 import time
 import traceback
+from collections.abc import Mapping
 from concurrent.futures import Future, wait
 from typing import Final
 from unittest.mock import MagicMock
@@ -1311,6 +1312,25 @@ def test_token_counter_with_tool_reference_block():
         model="anthropic/claude-sonnet-4-5-20250929", messages=messages_empty
     )
     assert tokens_empty >= 0
+
+
+def test_token_counter_counts_tool_addition_block_like_the_tool_reference_it_wraps():
+    model: Final = "anthropic/claude-sonnet-5"
+    tool_name: Final = "search_knowledge_base"
+    reference: Final = {"type": "tool_reference", "tool_name": tool_name}
+    reply: Final = {"type": "text", "text": "Let me look up the right tool."}
+    user_turn: Final = {"role": "user", "content": "find the refund policy"}
+
+    def conversation(*assistant_blocks: Mapping[str, object]) -> list[Mapping[str, object]]:
+        return [user_turn, {"role": "assistant", "content": [*assistant_blocks, reply]}]
+
+    with_addition: Final = token_counter(
+        model=model, messages=conversation({"type": "tool_addition", "tool_reference": reference})
+    )
+    without_block: Final = token_counter(model=model, messages=conversation())
+
+    assert with_addition == token_counter(model=model, messages=conversation(reference))
+    assert with_addition - without_block == token_counter(model=model, text=tool_name)
 
 
 def test_count_content_list_rejects_unknown_type():
