@@ -87,6 +87,7 @@
     "kwargs"
   ],
   "before_deployment_call": [
+    "logger",
     "kwargs",
     "call_type"
   ],

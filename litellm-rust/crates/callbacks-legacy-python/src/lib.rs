@@ -107,7 +107,7 @@ FAKES = {
     'credential_list': lambda: [],
     'warn_unknown_credential': lambda name, loaded: None,
     'pre_request_hooks': lambda model, messages, kwargs: kwargs['logger'].pre_request(model, messages, kwargs),
-    'before_deployment_call': lambda kwargs, call_type: kwargs['logger'].hook('pre', kwargs, call_type),
+    'before_deployment_call': lambda logger, kwargs, call_type: kwargs['logger'].hook('pre', kwargs, call_type),
     'after_deployment_success': lambda kwargs, response, call_type: kwargs['logger'].hook(
         'success', response, call_type
     ),
