@@ -17,7 +17,7 @@ mod marshal;
 pub use adapter::{
     InvokeError, LifecycleEvent, LifecycleStep, ProtocolHost, PythonLifecycle, missing_state,
 };
-pub use argument::lookup;
+pub use argument::{json_fields, lookup};
 pub use callable::wrap_failure;
 pub use driver::run_call;
 pub use execution::{

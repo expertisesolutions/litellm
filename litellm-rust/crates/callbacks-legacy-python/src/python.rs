@@ -15,7 +15,7 @@ const MODULE: &str = "litellm.rust_bridge.callbacks_legacy_python";
 pub(crate) enum LegacyPython {
     Wrapper(Wrapper),
     Logging(Logging),
-    DeploymentHooks(DeploymentHooks),
+    CallbackHooks(CallbackHooks),
     Streaming(Streaming),
 }
 
@@ -66,9 +66,10 @@ pub(crate) enum Logging {
     FailureHandler,
 }
 
-/// The fan-outs that run one hook of every registered callback.
+/// The fan-outs that run one hook of every registered callback: the pre-request hook and
+/// the deployment hooks.
 #[derive(Clone, Copy, Debug, IntoStaticStr, PartialEq, Eq, VariantArray)]
-pub(crate) enum DeploymentHooks {
+pub(crate) enum CallbackHooks {
     #[strum(serialize = "pre_request_hooks")]
     PreRequest,
     #[strum(serialize = "before_deployment_call")]
@@ -96,7 +97,7 @@ impl LegacyPython {
         match self {
             Self::Wrapper(function) => function.into(),
             Self::Logging(function) => function.into(),
-            Self::DeploymentHooks(function) => function.into(),
+            Self::CallbackHooks(function) => function.into(),
             Self::Streaming(function) => function.into(),
         }
     }
@@ -136,12 +137,12 @@ impl Streaming {
     }
 }
 
-impl DeploymentHooks {
+impl CallbackHooks {
     pub(crate) fn call<'py, A>(self, py: Python<'py>, args: A) -> PyResult<Bound<'py, PyAny>>
     where
         A: pyo3::call::PyCallArgs<'py>,
     {
-        LegacyPython::DeploymentHooks(self).call(py, args)
+        LegacyPython::CallbackHooks(self).call(py, args)
     }
 }
 
@@ -151,7 +152,7 @@ mod tests {
 
     use strum::VariantArray;
 
-    use super::{DeploymentHooks, LegacyPython, Logging, Streaming, Wrapper};
+    use super::{CallbackHooks, LegacyPython, Logging, Streaming, Wrapper};
     use crate::test_support::PYTHON_CONTRACT;
 
     #[test]
@@ -168,9 +169,9 @@ mod tests {
                     .map(|&function| LegacyPython::Logging(function)),
             )
             .chain(
-                DeploymentHooks::VARIANTS
+                CallbackHooks::VARIANTS
                     .iter()
-                    .map(|&function| LegacyPython::DeploymentHooks(function)),
+                    .map(|&function| LegacyPython::CallbackHooks(function)),
             )
             .chain(
                 Streaming::VARIANTS
