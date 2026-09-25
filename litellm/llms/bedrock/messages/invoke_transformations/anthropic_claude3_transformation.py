@@ -3,6 +3,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
+from pydantic import JsonValue
 
 import litellm
 from litellm.anthropic_beta_headers_manager import filter_and_transform_beta_headers
@@ -12,6 +13,7 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET,
     DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET,
 )
+from litellm.litellm_core_utils.core_helpers import normalize_drop_params
 from litellm.litellm_core_utils.litellm_logging import verbose_logger
 from litellm.llms.anthropic.chat.transformation import (
     DROP_UNSUPPORTED_OUTPUT_CONFIG_WARNING,
@@ -40,6 +42,13 @@ from litellm.llms.bedrock.common_utils import (
     normalize_tool_input_schema_types_for_bedrock_invoke,
     strip_unsupported_bedrock_invoke_output_config_keys,
     tools_without_eager_input_streaming,
+)
+from litellm.llms.bedrock.messages.invoke_transformations.unsupported_extensions import (
+    OptIns,
+    Refused,
+    Unchanged,
+    raise_refusal,
+    sanitize_for_bedrock_invoke,
 )
 from litellm.llms.bedrock.request_metadata import (
     bedrock_request_metadata_headers,
@@ -84,6 +93,9 @@ class AmazonAnthropicClaudeMessagesConfig(
     @property
     def beta_headers_provider(self) -> str:
         return self.custom_llm_provider or "bedrock"
+
+    def should_sanitize_unsupported_invoke_extensions(self) -> bool:
+        return True
 
     BEDROCK_INVOKE_ALLOWED_TOP_LEVEL_FIELDS = frozenset(BedrockInvokeAnthropicMessagesRequest.__annotations__.keys())
 
@@ -616,6 +628,31 @@ class AmazonAnthropicClaudeMessagesConfig(
             llm_provider="bedrock",
         )
 
+    def _unsupported_extension_replacements(
+        self,
+        anthropic_messages_request: Mapping[str, object],
+        model: str,
+        litellm_params: GenericLiteLLMParams | Mapping[str, object],
+    ) -> Mapping[str, JsonValue]:
+        if not self.should_sanitize_unsupported_invoke_extensions():
+            return MappingProxyType({})
+        deployment_drop_params: Final = _deployment_drop_params(litellm_params)
+        opt_ins: Final = OptIns(
+            drop_params=deployment_drop_params if deployment_drop_params is not None else litellm.drop_params is True,
+            modify_params=litellm.modify_params is True,
+        )
+        outcome: Final = sanitize_for_bedrock_invoke(anthropic_messages_request, opt_ins)
+        if isinstance(outcome, Unchanged):
+            return MappingProxyType({})
+        if isinstance(outcome, Refused):
+            raise_refusal(outcome, model=model)
+        verbose_logger.warning(
+            "Bedrock Invoke: dropping unsupported request parts %s for model=%s",
+            tuple(offender.path for offender in outcome.removed),
+            model,
+        )
+        return outcome.replacements
+
     def _strip_unsupported_bedrock_invoke_fields(
         self,
         anthropic_messages_request: dict,
@@ -695,6 +732,11 @@ class AmazonAnthropicClaudeMessagesConfig(
 
         # 4. Remove `ttl` field from cache_control in messages (Bedrock doesn't support it for older models)
         self._remove_ttl_from_cache_control(anthropic_messages_request=anthropic_messages_request, model=model)
+        anthropic_messages_request.update(
+            self._unsupported_extension_replacements(
+                anthropic_messages_request, model=model, litellm_params=litellm_params
+            )
+        )
 
         # 5. Route structured-output params (`output_format` /
         # `output_config.format`) to native enforcement or the inline-schema
@@ -914,6 +956,15 @@ class AmazonAnthropicClaudeMessagesConfig(
             if delta_usage:
                 pending_delta["usage"] = delta_usage
             yield pending_delta
+
+
+def _deployment_drop_params(litellm_params: GenericLiteLLMParams | Mapping[str, object]) -> bool | None:
+    configured: Final = (
+        litellm_params.drop_params
+        if isinstance(litellm_params, GenericLiteLLMParams)
+        else litellm_params.get("drop_params")
+    )
+    return normalize_drop_params(configured)
 
 
 class AmazonAnthropicClaudeMessagesStreamDecoder(AWSEventStreamDecoder):

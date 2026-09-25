@@ -14,6 +14,8 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
+import litellm
+
 # Ensure the project root is on the import path so `litellm` can be imported when
 # tests are executed from any working directory.
 
@@ -36,6 +38,7 @@ from litellm.llms.bedrock.messages.invoke_transformations.anthropic_claude3_tran
     AmazonAnthropicClaudeMessagesConfig,
     AmazonAnthropicClaudeMessagesStreamDecoder,
 )
+from litellm.types.router import GenericLiteLLMParams
 
 
 @pytest.mark.asyncio
@@ -3494,3 +3497,111 @@ async def test_get_async_streaming_response_iterator_yields_small_frame_before_u
     remaining: Final = tuple([chunk async for chunk in iterator])
     assert any(chunk.startswith(b"event: message_stop\n") for chunk in remaining), remaining
     await iterator.aclose()
+
+
+_TOOL_ADDITION = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "mcp__files__read"}}
+_OUTPUT_CONFIG_TURN = {
+    "role": "assistant",
+    "output_config": {"effort": "high"},
+    "content": [{"type": "text", "text": "Reading it now."}],
+}
+_TOOL_ADDITION_TURN = {"role": "assistant", "content": [{"type": "text", "text": "ok"}, _TOOL_ADDITION]}
+_UPDATES_THINKING = {"type": "adaptive", "display": "updates"}
+
+
+def _invoke_request(messages, *, thinking=None, litellm_params=None):
+    return AmazonAnthropicClaudeMessagesConfig().transform_anthropic_messages_request(
+        model="us.anthropic.claude-opus-4-7",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 300, **({"thinking": thinking} if thinking else {})},
+        litellm_params=litellm_params or GenericLiteLLMParams(),
+        headers={},
+    )
+
+
+@pytest.mark.parametrize("modify_params", [False, True])
+@pytest.mark.parametrize(
+    ("messages", "thinking", "path"),
+    [
+        ([_OUTPUT_CONFIG_TURN], None, "messages[0].output_config"),
+        ([{"role": "user", "content": "hi"}], _UPDATES_THINKING, "thinking.display (value 'updates')"),
+    ],
+)
+def test_bedrock_invoke_refuses_unsupported_params_without_drop_params(
+    monkeypatch, modify_params, messages, thinking, path
+):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    monkeypatch.setattr(litellm, "modify_params", modify_params)
+
+    with pytest.raises(litellm.UnsupportedParamsError) as exc_info:
+        _invoke_request(messages, thinking=thinking)
+
+    assert path in str(exc_info.value)
+    assert "`drop_params: true` in this deployment's `litellm_params`" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("drop_params", [False, True])
+def test_bedrock_invoke_refuses_tool_addition_blocks_without_modify_params(monkeypatch, drop_params):
+    monkeypatch.setattr(litellm, "modify_params", False)
+
+    with pytest.raises(litellm.BadRequestError) as exc_info:
+        _invoke_request([_TOOL_ADDITION_TURN], litellm_params=GenericLiteLLMParams(drop_params=drop_params))
+
+    assert not isinstance(exc_info.value, litellm.UnsupportedParamsError)
+    assert "messages[0].content[1] (type 'tool_addition')" in str(exc_info.value)
+    assert "`litellm_settings.modify_params: true`" in str(exc_info.value)
+
+
+def test_bedrock_invoke_refusal_names_every_blocked_offender(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    monkeypatch.setattr(litellm, "modify_params", False)
+
+    with pytest.raises(litellm.UnsupportedParamsError) as exc_info:
+        _invoke_request(
+            [_OUTPUT_CONFIG_TURN, {"role": "user", "content": "go"}, _TOOL_ADDITION_TURN], thinking=_UPDATES_THINKING
+        )
+
+    assert "thinking.display (value 'updates'), messages[0].output_config" in str(exc_info.value)
+    assert "messages[2].content[1] (type 'tool_addition')" in str(exc_info.value)
+    assert "modify_params" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("deployment_drop_params", "global_drop_params"), [(True, False), (None, True)])
+def test_bedrock_invoke_drop_params_strips_unsupported_params(monkeypatch, deployment_drop_params, global_drop_params):
+    monkeypatch.setattr(litellm, "drop_params", global_drop_params)
+
+    result = _invoke_request(
+        [_OUTPUT_CONFIG_TURN], litellm_params=GenericLiteLLMParams(drop_params=deployment_drop_params)
+    )
+
+    assert result["messages"] == [{"role": "assistant", "content": [{"type": "text", "text": "Reading it now."}]}]
+
+
+def test_bedrock_invoke_deployment_drop_params_false_overrides_global(monkeypatch):
+    monkeypatch.setattr(litellm, "drop_params", True)
+
+    with pytest.raises(litellm.UnsupportedParamsError):
+        _invoke_request([_OUTPUT_CONFIG_TURN], litellm_params=GenericLiteLLMParams(drop_params=False))
+
+
+def test_bedrock_invoke_strips_every_extension_when_both_opt_ins_are_on(monkeypatch):
+    monkeypatch.setattr(litellm, "modify_params", True)
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "read /tmp/a.txt"}]},
+        {**_TOOL_ADDITION_TURN, "output_config": {"effort": "high"}},
+        {"role": "user", "content": [{"type": "text", "text": "continue"}]},
+        {"role": "assistant", "content": [_TOOL_ADDITION]},
+    ]
+    thinking = dict(_UPDATES_THINKING)
+    snapshot = copy.deepcopy((messages, thinking))
+
+    result = _invoke_request(messages, thinking=thinking, litellm_params=GenericLiteLLMParams(drop_params=True))
+
+    assert result["messages"] == [
+        messages[0],
+        {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        messages[2],
+        {"role": "assistant", "content": [{"type": "text", "text": "Please continue."}]},
+    ]
+    assert result["thinking"] == {"type": "adaptive"}
+    assert (messages, thinking) == snapshot
