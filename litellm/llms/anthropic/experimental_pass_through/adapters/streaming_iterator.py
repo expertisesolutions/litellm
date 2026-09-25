@@ -240,6 +240,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
 
                     # Add usage to the held chunk
                     uncached_input_tokens = chunk.usage.prompt_tokens or 0
+                    cached_tokens = 0
                     if hasattr(chunk.usage, "prompt_tokens_details") and chunk.usage.prompt_tokens_details:
                         cached_tokens = getattr(chunk.usage.prompt_tokens_details, "cached_tokens", 0) or 0
                         uncached_input_tokens -= cached_tokens
@@ -251,8 +252,13 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                     # Add cache tokens if available (for prompt caching support)
                     if hasattr(chunk.usage, "_cache_creation_input_tokens") and chunk.usage._cache_creation_input_tokens > 0:
                         usage_dict["cache_creation_input_tokens"] = chunk.usage._cache_creation_input_tokens
-                    if hasattr(chunk.usage, "_cache_read_input_tokens") and chunk.usage._cache_read_input_tokens > 0:
-                        usage_dict["cache_read_input_tokens"] = chunk.usage._cache_read_input_tokens
+                    # Prefer the Anthropic-native private field; fall back to the OpenAI
+                    # prompt_tokens_details.cached_tokens (e.g. llama-server).
+                    cache_read_input_tokens = (
+                        getattr(chunk.usage, "_cache_read_input_tokens", 0) or 0
+                    ) or cached_tokens
+                    if cache_read_input_tokens > 0:
+                        usage_dict["cache_read_input_tokens"] = cache_read_input_tokens
                     merged_chunk["usage"] = usage_dict
 
                     # Queue the merged chunk and reset

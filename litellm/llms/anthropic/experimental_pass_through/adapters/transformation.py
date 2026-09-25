@@ -1071,6 +1071,7 @@ class LiteLLMAnthropicMessagesAdapter:
         # extract usage
         usage: Usage = getattr(response, "usage")
         uncached_input_tokens = usage.prompt_tokens or 0
+        cached_tokens = 0
         if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
             cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
             uncached_input_tokens -= cached_tokens
@@ -1082,8 +1083,14 @@ class LiteLLMAnthropicMessagesAdapter:
         # Add cache tokens if available (for prompt caching support)
         if hasattr(usage, "_cache_creation_input_tokens") and usage._cache_creation_input_tokens > 0:
             anthropic_usage["cache_creation_input_tokens"] = usage._cache_creation_input_tokens
-        if hasattr(usage, "_cache_read_input_tokens") and usage._cache_read_input_tokens > 0:
-            anthropic_usage["cache_read_input_tokens"] = usage._cache_read_input_tokens
+        # Prefer the Anthropic-native private field; fall back to the OpenAI
+        # prompt_tokens_details.cached_tokens so backends that only report cache
+        # hits there (e.g. llama-server) still surface cache_read_input_tokens.
+        cache_read_input_tokens = (
+            getattr(usage, "_cache_read_input_tokens", 0) or 0
+        ) or cached_tokens
+        if cache_read_input_tokens > 0:
+            anthropic_usage["cache_read_input_tokens"] = cache_read_input_tokens
 
         translated_obj = AnthropicMessagesResponse(
             id=response.id,
@@ -1236,6 +1243,7 @@ class LiteLLMAnthropicMessagesAdapter:
                 litellm_usage_chunk = None
             if litellm_usage_chunk is not None:
                 uncached_input_tokens = litellm_usage_chunk.prompt_tokens or 0
+                cached_tokens = 0
                 if hasattr(litellm_usage_chunk, "prompt_tokens_details") and litellm_usage_chunk.prompt_tokens_details:
                     cached_tokens = getattr(litellm_usage_chunk.prompt_tokens_details, "cached_tokens", 0) or 0
                     uncached_input_tokens -= cached_tokens
@@ -1247,8 +1255,13 @@ class LiteLLMAnthropicMessagesAdapter:
                 # Add cache tokens if available (for prompt caching support)
                 if hasattr(litellm_usage_chunk, "_cache_creation_input_tokens") and litellm_usage_chunk._cache_creation_input_tokens > 0:
                     usage_delta["cache_creation_input_tokens"] = litellm_usage_chunk._cache_creation_input_tokens
-                if hasattr(litellm_usage_chunk, "_cache_read_input_tokens") and litellm_usage_chunk._cache_read_input_tokens > 0:
-                    usage_delta["cache_read_input_tokens"] = litellm_usage_chunk._cache_read_input_tokens
+                # Prefer the Anthropic-native private field; fall back to the OpenAI
+                # prompt_tokens_details.cached_tokens (e.g. llama-server).
+                cache_read_input_tokens = (
+                    getattr(litellm_usage_chunk, "_cache_read_input_tokens", 0) or 0
+                ) or cached_tokens
+                if cache_read_input_tokens > 0:
+                    usage_delta["cache_read_input_tokens"] = cache_read_input_tokens
             else:
                 usage_delta = UsageDelta(input_tokens=0, output_tokens=0)
             return MessageBlockDelta(
