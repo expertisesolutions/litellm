@@ -1,3 +1,5 @@
+> **Expertise fork:** this repository is our fork. The official branch is `expertise-main` (the role `main` has upstream). Every change we run must be merged into it. Read [FORK.md](FORK.md) before you branch, merge, or build an install.
+
 Do not write comments unless they are any of:
 - absolutely necessary to explain some very complex business logic (in which case, keep it concise and clear)
 - used as an input for tools to read and act on. For example:
