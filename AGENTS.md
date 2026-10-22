@@ -1,5 +1,7 @@
 # INSTRUCTIONS FOR LITELLM
 
+> **Expertise fork:** this repository is our fork. The official branch is `expertise-main` (the role `main` has upstream). Every change we run must be merged into it. Read [FORK.md](FORK.md) before you branch, merge, or build an install.
+
 This document provides comprehensive instructions for AI agents working in the LiteLLM repository.
 
 ## OVERVIEW
