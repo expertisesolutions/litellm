@@ -51,7 +51,7 @@ git push origin expertise-main
 
 Downstream deploys build a pinned Python venv from a commit of this branch. Our install reports version `1.81.13`, which is the upstream release our line is based on. The venv is a copy: pushing to `expertise-main` does not update an existing venv. Rebuild the venv from the new commit and restart the proxy deliberately.
 
-Known open item: the provisioning script pins the version against PyPI. Rebuilding from PyPI would silently drop our patch. A rebuild must come from a commit of this branch, not from PyPI.
+Our provisioning script (in the private ops repo) installs the venv from `expertise-main`, never from PyPI, and verifies a marker string introduced by `c69822ac61` in the installed package after every run. A venv without the marker is reinstalled from this branch (package only, dependencies untouched), and the script fails if the marker is still absent. A rebuild can therefore no longer silently drop our patch.
 
 ## Taking in upstream changes
 
