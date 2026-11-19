@@ -5527,3 +5527,96 @@ async def test_chat_bridge_tool_result_text_block_without_text_reaches_the_model
             ],
         }
     ]
+
+
+def test_translate_openai_response_to_anthropic_cache_read_from_prompt_tokens_details():
+    """
+    Regression test: an OpenAI-compatible backend that reports cache hits ONLY via
+    ``prompt_tokens_details.cached_tokens`` (e.g. llama-server) must still surface
+    ``cache_read_input_tokens`` in the Anthropic response.
+
+    Unlike the Anthropic/DeepSeek paths, this backend does not send
+    ``cache_read_input_tokens`` or ``prompt_cache_hit_tokens``, so
+    ``Usage._cache_read_input_tokens`` stays 0 and the cache-read count is only
+    present under ``prompt_tokens_details.cached_tokens``. The adapter must derive
+    the Anthropic ``cache_read_input_tokens`` from there.
+
+    Ported from c69822ac61 (1.81.13 base); replayed on v1.109.1 to decide whether
+    the original code patch is still needed.
+    """
+    from litellm.types.utils import PromptTokensDetailsWrapper
+
+    # llama-server shape: cached tokens live ONLY in prompt_tokens_details,
+    # with no top-level cache_read_input_tokens / prompt_cache_hit_tokens.
+    usage = Usage(
+        prompt_tokens=51028,
+        completion_tokens=48,
+        total_tokens=51076,
+        prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=50939),
+    )
+
+    response = ModelResponse(
+        id="test-id",
+        choices=[
+            Choices(
+                index=0,
+                finish_reason="stop",
+                message=Message(
+                    role="assistant",
+                    content="Test response",
+                ),
+            )
+        ],
+        model="claude-3-sonnet-20240229",
+        usage=usage,
+    )
+
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    anthropic_response = adapter.translate_openai_response_to_anthropic(
+        response=response,
+        tool_name_mapping=None,
+    )
+
+    # input_tokens excludes the cached prefix (51028 - 50939 = 89).
+    assert anthropic_response["usage"]["input_tokens"] == 89
+    assert anthropic_response["usage"]["output_tokens"] == 48
+    # The cache-read count must not be lost just because it arrived via
+    # prompt_tokens_details instead of the Anthropic-native field.
+    assert anthropic_response["usage"]["cache_read_input_tokens"] == 50939
+
+
+def test_translate_streaming_openai_response_to_anthropic_cache_read_from_prompt_tokens_details():
+    """
+    Streaming variant of the llama-server shape above, ported from c69822ac61:
+    a final delta carrying usage with only prompt_tokens_details.cached_tokens
+    must still surface cache_read_input_tokens in the Anthropic usage delta.
+    """
+    from litellm.types.utils import PromptTokensDetailsWrapper
+
+    usage = Usage(
+        prompt_tokens=51028,
+        completion_tokens=48,
+        total_tokens=51076,
+        prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=50939),
+    )
+
+    response = ModelResponseStream(
+        choices=[
+            StreamingChoices(
+                index=0,
+                delta=Delta(),
+                finish_reason="stop",
+            )
+        ],
+        usage=usage,
+    )
+
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    message_delta = adapter.translate_streaming_openai_response_to_anthropic(
+        response=response,
+        current_content_block_index=0,
+    )
+
+    assert message_delta["usage"]["input_tokens"] == 89
+    assert message_delta["usage"]["output_tokens"] == 48
+    assert message_delta["usage"]["cache_read_input_tokens"] == 50939
