@@ -6,7 +6,7 @@ Source: litellm/llms/chatgpt/responses/transformation.py
 
 import base64
 import json
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from pathlib import Path
 from typing import Final
 from unittest.mock import MagicMock, patch
@@ -667,3 +667,147 @@ def test_prompt_cache_key_keeps_one_session_header_across_requests(
             )
 
     assert [call.args[0].headers["session_id"] for call in upstream.call_args_list] == ["conv-123", "conv-123"]
+
+
+CLAUDE_CODE_SYSTEM_MARKERS: Final = ("SYS_BLOCK_A", "SYS_BLOCK_B", "MID_SYS", "PLAIN_SYS")
+
+
+def _responses_item_text(item: Mapping[str, object]) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(str(part.get("text", "")) for part in content if isinstance(part, Mapping))
+    return ""
+
+
+@pytest.mark.parametrize("entry_point", ["responses", "completion"])
+def test_chatgpt_claude_code_shaped_system_messages_never_reach_codex_as_system(
+    entry_point: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    local_model_cost_map: None,
+) -> None:
+    """System messages shaped like a Claude Code -> Bifrost -> ChatGPT fallback must reach the
+    Codex backend as developer items (or as instructions on the chat completions bridge),
+    never as role "system".
+
+    The Bifrost Anthropic->Responses conversion sends a leading type-less system item with
+    list-of-text-blocks content plus mid-conversation {"type": "message", "role": "system"}
+    items; the pre-fix ChatGPT transformation forwarded them verbatim and the Codex backend
+    answered 400 "System messages are not allowed".
+    """
+    (tmp_path / "auth.json").write_text(
+        json.dumps({"access_token": "token", "account_id": "acct", "expires_at": 4102444800})
+    )
+    monkeypatch.setenv("CHATGPT_TOKEN_DIR", str(tmp_path))
+    monkeypatch.delenv("CHATGPT_AUTH_FILE", raising=False)
+
+    completed: Final = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "status": "completed",
+            "model": "gpt-5.6-luna",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "OK", "annotations": []}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        },
+    }
+    upstream: Final = MagicMock(
+        side_effect=lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=f"event: response.completed\ndata: {json.dumps(completed)}\n\n".encode(),
+        )
+    )
+    client: Final = HTTPHandler(client=httpx.Client(transport=httpx.MockTransport(upstream)))
+
+    if entry_point == "responses":
+        # the direct /v1/responses entry point, the path Bifrost actually hits
+        litellm.responses(
+            model="chatgpt/gpt-5.6-luna",
+            input=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "SYS_BLOCK_A"},
+                        {"type": "text", "text": "SYS_BLOCK_B"},
+                    ],
+                },
+                {"role": "system", "content": "PLAIN_SYS"},
+                {"type": "message", "role": "user", "content": "USER_TURN_1"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ASSISTANT_TURN_1"}],
+                },
+                {"type": "message", "role": "system", "content": "MID_SYS"},
+                {"type": "message", "role": "user", "content": "USER_TURN_2"},
+            ],
+            stream=True,
+            client=client,
+        )
+    else:
+        # the /v1/chat/completions entry point, bridged to the same responses transformation
+        litellm.completion(
+            model="chatgpt/gpt-5.6-luna",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "SYS_BLOCK_A"},
+                        {"type": "text", "text": "SYS_BLOCK_B"},
+                    ],
+                },
+                {"role": "system", "content": "PLAIN_SYS"},
+                {"role": "user", "content": "USER_TURN_1"},
+                {"role": "assistant", "content": "ASSISTANT_TURN_1"},
+                {"role": "system", "content": "MID_SYS"},
+                {"role": "user", "content": "USER_TURN_2"},
+            ],
+            client=client,
+        )
+
+    assert upstream.call_count == 1
+    body: Final = json.loads(upstream.call_args_list[0].args[0].content)
+
+    assert body["stream"] is True
+    assert [item for item in body["input"] if item.get("role") == "system"] == []
+
+    instructions: Final = body.get("instructions") or ""
+    developer_blob: Final = "\n".join(
+        _responses_item_text(item) for item in body["input"] if item.get("role") == "developer"
+    )
+    for marker in CLAUDE_CODE_SYSTEM_MARKERS:
+        assert marker in instructions or marker in developer_blob, (
+            f"{marker} missing from both instructions and developer items"
+        )
+
+    if entry_point == "responses":
+        # nothing is lifted into instructions on this path; all three items are rewritten in place
+        assert "PLAIN_SYS" in developer_blob
+        assert "PLAIN_SYS" not in instructions
+    else:
+        # the chat completions bridge lifts the leading string system message into instructions
+        assert "PLAIN_SYS" in instructions
+        assert "PLAIN_SYS" not in developer_blob
+
+    assert [
+        (item.get("role"), _responses_item_text(item))
+        for item in body["input"]
+        if item.get("role") in ("user", "assistant")
+    ] == [
+        ("user", "USER_TURN_1"),
+        ("assistant", "ASSISTANT_TURN_1"),
+        ("user", "USER_TURN_2"),
+    ]
