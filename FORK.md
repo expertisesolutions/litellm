@@ -31,7 +31,7 @@ This fork is public. Do not commit host names, IP addresses, credentials, or any
 2. Start new work from `expertise-main`. Use a short-lived branch (for example `fix/provider-shape`).
 3. When the work is done and tested, merge the branch into `expertise-main` and push it to `origin`.
 4. Do not build a production install from a feature branch. Build from a commit that is already in `expertise-main`.
-5. Do not rewrite the history of `expertise-main` (no force push, no rebase of published commits).
+5. Do not rewrite the history of `expertise-main` for normal work (no force push, no rebase of published commits). The one allowed exception is a deliberate move to a new upstream release tag, described in "Taking in upstream changes". It needs a backup tag and `--force-with-lease`.
 6. Run the targeted tests for the code you touched before you merge. The full litellm suite is very large. The test tree is organized per provider. Run the area you touched, not the world.
 7. Keep our patches small and separate from upstream code where you can. A smaller patch conflicts less when we take a new upstream version.
 
@@ -49,33 +49,41 @@ git push origin expertise-main
 
 ## Building the production install
 
-Downstream deploys build a pinned Python venv from a commit of this branch. Our install reports version `1.81.13`, which is the upstream release our line is based on. The venv is a copy: pushing to `expertise-main` does not update an existing venv. Rebuild the venv from the new commit and restart the proxy deliberately.
+Downstream deploys build a pinned Python venv from a commit of this branch. The venv is a copy: pushing to `expertise-main` does not update an existing venv. Rebuild the venv from the new commit and restart the proxy deliberately.
 
-Our provisioning script (in the private ops repo) installs the venv from `expertise-main`, never from PyPI, and verifies a marker string introduced by `c69822ac61` in the installed package after every run. A venv without the marker is reinstalled from this branch (package only, dependencies untouched), and the script fails if the marker is still absent. A rebuild can therefore no longer silently drop our patch.
+Since 2026-11-19 the branch is based on upstream release `v1.109.1`, so the installed package reports version `1.109.1`.
+
+The package has a Rust extension, built by `maturin`, so an install compiles it. Install it from a git URL pinned to a full commit of this branch. `pip` then records the repository URL and commit in the package metadata (`direct_url.json`).
+
+Our provisioning scripts (in the private ops repo) install from this fork, never from PyPI. They check two things after every run: the recorded install URL points at this fork, and the file `litellm/llms/chatgpt/responses/transformation.py` in the installed package contains `_system_item_as_developer`. A PyPI install has neither the fork URL nor our line. A rebuild can therefore not silently fall back to the vanilla release.
 
 ## Taking in upstream changes
 
-We follow upstream on purpose, not automatically.
+We follow upstream on purpose, not automatically. Move to a new upstream release tag in this order:
 
-```sh
-git fetch upstream
-git switch -c sync/upstream-<date> expertise-main
-git merge upstream/main
-# resolve conflicts, run the targeted tests
-git switch expertise-main
-git merge --no-ff sync/upstream-<date>
-git push origin expertise-main
-```
+1. Fetch the upstream tags: `git fetch upstream --tags`.
+2. Create a work branch at the new upstream release tag: `git worktree add -b rebase/<tag> <path> <tag>`.
+3. Replay our commits on top of it with `git cherry-pick -x`, oldest first. This gives the same history as `git rebase --onto`, and it lets you decide per commit whether upstream already has the change.
+4. For each commit that carries code, write or port its regression test first. If the test already passes on the plain upstream tag, keep the test and drop the code.
+5. Run the targeted tests, and compare them with a plain upstream baseline so you only look at failures that are new.
+6. Push the work branch.
+7. Push a backup tag that points at the old tip of `expertise-main`.
+8. Replace `expertise-main` with `git push --force-with-lease=expertise-main:<old-tip> origin <work-branch>:expertise-main`. The lease must name the exact old tip.
 
-Merge upstream into our branch. Do not rebase our branch onto upstream.
+Use this path only for a move to a new release tag. For all other work, use the normal workflow above.
 
-litellm moves very fast. Our line was only one commit behind `upstream/main` when this branch was created (2026-10-22), but it will fall behind again quickly. The file we patch is the Anthropic experimental pass-through adapter (`litellm/llms/anthropic/experimental_pass_through/adapters/`). Expect conflicts there first.
+litellm moves very fast. Expect conflicts in `AGENTS.md` first, because upstream edits it often.
 
 ## Where we started
 
-`expertise-main` was created on 2026-10-22 from the branch `fix/anthropic-adapter-cache-read-input-tokens` (commit `c69822ac61`).
+`expertise-main` was created on 2026-10-22 from the branch `fix/anthropic-adapter-cache-read-input-tokens` (commit `c69822ac61`). It was based on the upstream release line through version 1.81.13.
 
-- Base: the upstream release line through the 2026-02-16 release (version 1.81.13), pulled in through two release-branch merges.
-- Our patch: a single commit (`c69822ac61`). It derives `cache_read_input_tokens` from `prompt_tokens_details.cached_tokens` in the Anthropic experimental pass-through adapter, in all three translation sites (non-streaming, streaming delta, streaming iterator), so a local llama-server reports cache reads through the router. It adds a regression test for that usage shape.
+On 2026-11-19, by owner decision, we replayed our commits on top of upstream release tag `v1.109.1`. That release contains the fix that sends `system` input items to the ChatGPT backend as `developer` (upstream pull request 48668). The old branch tip was `16f2ffb1ee`. It is kept as the tag `expertise-main-pre-rebase-2026-11-19`.
+
+What we carry on top of `v1.109.1`:
+
+- Docs: this file, and a one-line header in `AGENTS.md`.
+- Test: a regression test that a usage object with only `prompt_tokens_details.cached_tokens` still gives `cache_read_input_tokens` in the Anthropic response, in both non-streaming and streaming form. Upstream now has this behavior, so we dropped the old code patch (`c69822ac61`) and kept the test.
+- Test: a regression test that system messages shaped like a Claude Code request, sent through a router, never reach the ChatGPT backend with role `system`. They arrive as `developer` items or as `instructions`. It runs through both `litellm.responses` and `litellm.completion`.
 
 The older branch name `fix/anthropic-adapter-cache-read-input-tokens` is kept so old references still work. Do not add new work to it.
