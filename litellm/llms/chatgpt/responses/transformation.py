@@ -14,7 +14,10 @@ from litellm.litellm_core_utils.url_utils import join_api_base
 from litellm.llms.base_llm.responses.transformation import STANDARD_MODE_REASONING_FIELD_VALUES, ReasoningFieldValues
 from litellm.llms.custom_httpx.sse_lines import split_sse_lines
 from litellm.llms.openai.common_utils import OpenAIError
-from litellm.llms.openai.responses.transformation import OpenAIResponsesAPIConfig
+from litellm.llms.openai.responses.transformation import (
+    OpenAIResponsesAPIConfig,
+    _item_with_wire_safe_prompt_cache_breakpoints,
+)
 from litellm.responses.sse_output_recovery import (
     parse_sse_json_chunk,
     record_output_item_chunk,
@@ -121,6 +124,12 @@ class ChatGPTResponsesAPIConfig(OpenAIResponsesAPIConfig):
             litellm_params,
             headers,
         )
+        # chatgpt.com/backend-api/codex 400s on "prompt_cache_breakpoint is not supported on this model".
+        # The Anthropic adapter maps Claude Code's cache_control onto that marker, so strip it after the
+        # parent transform, which is where it is added, whatever drop_params says.
+        request_input: Final = request.get("input")
+        if isinstance(request_input, list):
+            request["input"] = [_item_with_wire_safe_prompt_cache_breakpoints(item, False) for item in request_input]
         base_instructions: Final = get_chatgpt_default_instructions()
         existing_instructions: Final = request.get("instructions")
         if existing_instructions:

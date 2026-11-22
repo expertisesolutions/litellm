@@ -811,3 +811,37 @@ def test_chatgpt_claude_code_shaped_system_messages_never_reach_codex_as_system(
         ("assistant", "ASSISTANT_TURN_1"),
         ("user", "USER_TURN_2"),
     ]
+
+
+def _prompt_cache_breakpoint_paths(value: object, path: str = "") -> list[str]:
+    if isinstance(value, Mapping):
+        found = [f"{path}/{key}" for key in value if key == "prompt_cache_breakpoint"]
+        for key, item in value.items():
+            found += _prompt_cache_breakpoint_paths(item, f"{path}/{key}")
+        return found
+    if isinstance(value, list):
+        return [hit for index, item in enumerate(value) for hit in _prompt_cache_breakpoint_paths(item, f"{path}[{index}]")]
+    return []
+
+
+@pytest.mark.parametrize("drop_params", [False, True])
+def test_chatgpt_never_sends_prompt_cache_breakpoint_to_the_codex_backend(drop_params: bool) -> None:
+    """chatgpt.com/backend-api/codex answers 400 "prompt_cache_breakpoint is not supported on this
+    model". The Anthropic adapter maps Claude Code's cache_control onto that marker, so a
+    Bifrost -> ChatGPT fallback reached the backend with it until the ChatGPT config stripped it."""
+    marker: Final = {"mode": "explicit"}
+    request: Final = ChatGPTResponsesAPIConfig().transform_responses_api_request(
+        model="gpt-6-astra",
+        input=[
+            {"role": "system", "content": [{"type": "input_text", "text": "SYS", "prompt_cache_breakpoint": marker}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "HI", "prompt_cache_breakpoint": marker}]},
+            {"type": "message", "role": "user", "content": "TOP", "prompt_cache_breakpoint": marker},
+        ],
+        response_api_optional_request_params={},
+        litellm_params=GenericLiteLLMParams(**({"drop_params": True} if drop_params else {})),
+        headers={},
+    )
+
+    assert _prompt_cache_breakpoint_paths(request) == []
+    assert [item["role"] for item in request["input"]] == ["developer", "user", "user"]
+    assert request["input"][0]["content"][0]["text"] == "SYS"
